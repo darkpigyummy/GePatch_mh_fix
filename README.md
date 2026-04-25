@@ -95,6 +95,17 @@ The goal is to **keep the engine predictable and responsive**, especially during
 This is an experimental optimization plugin.
 Results may vary depending on device, firmware, and game state.
 
+## NOTICE
+
+This project is based on the original GePatch project.
+
+Modifications by Xu Pingfan:
+- Renamed to ge_mh_patch.prx
+- Modified GU blend/color hook behavior
+- Adjusted for Monster Hunter Portable 3rd compatibility
+- Updated plugin loading paths for Adrenaline 7/8 + ARK5/EPI
+
+Original authors retain their respective copyrights.
 
 ## License
 
@@ -207,6 +218,18 @@ game, ms0:/seplugins/ge_mh_patch.prx, on
 ## 📌 免责声明
 
 本插件属于实验性优化，不同设备和环境效果可能不同。
+
+## 声明（NOTICE）
+
+本项目基于原始 GePatch 项目进行修改。
+
+徐平凡的修改内容包括：
+- 重命名为 ge_mh_patch.prx
+- 修改 GU blend/color 的 hook 行为
+- 针对《怪物猎人P3rd》进行适配优化
+- 更新 Adrenaline 7/8 + ARK5/EPI 的插件加载路径
+
+原作者保留其各自的版权。
 
 ## 许可证
 
