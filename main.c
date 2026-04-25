@@ -1,15 +1,14 @@
 #include <pspsdk.h>
 #include <pspkernel.h>
-#include <pspctrl.h>
 #include <pspge.h>
 #include <pspgu.h>
-
 #include <stdio.h>
 #include <string.h>
-
 #include <systemctrl.h>
-
 #include "ge_constants.h"
+
+#undef FindProc
+#define FindProc sctrlHENFindFunction
 
 PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 
@@ -28,38 +27,21 @@ PSP_MODULE_INFO("GePatch", 0x1007, 1, 0);
 #define VRAM_DRAW_BUFFER_OFFSET 0x04000000
 #define VRAM_DEPTH_BUFFER_OFFSET 0x04100000
 #define VRAM_1KB 0x041ff000
+#define VERTEX_CACHE_SIZE 512//改一下缓存大小
+#define log(...)
 
-#define log(...) \
-{ \
-  char msg[256]; \
-  sprintf(msg,__VA_ARGS__); \
-  logmsg(msg); \
-}
+// void logmsg(char *msg) {
+//   int k1 = pspSdkSetK1(0);
 
-void logmsg(char *msg) {
-  int k1 = pspSdkSetK1(0);
+//   SceUID fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT, 0777);
+//   if (fd >= 0) {
+//     sceIoLseek(fd, 0, PSP_SEEK_END);
+//     sceIoWrite(fd, msg, strlen(msg));
+//     sceIoClose(fd);
+//   }
 
-  SceUID fd = sceIoOpen("ms0:/ge_patch.txt", PSP_O_WRONLY | PSP_O_CREAT, 0777);
-  if (fd >= 0) {
-    sceIoLseek(fd, 0, PSP_SEEK_END);
-    sceIoWrite(fd, msg, strlen(msg));
-    sceIoClose(fd);
-  }
-
-  pspSdkSetK1(k1);
-}
-
-int checkAddress(u32 addr) {
-  addr &= 0x0fffffff;
-  if (addr >= 0x08400000 && addr < 0x0A400000)
-    return 0;
-  if (addr >= 0x04000000 && addr < 0x04200000) {
-    // log("vram address: %08x\n", addr);
-    return -1;
-  }
-  log("invalid address: %08x\n", addr);
-  return -1;
-}
+//   pspSdkSetK1(k1);
+// }
 
 static const u8 tcsize[4] = { 0, 2, 4, 8 }, tcalign[4] = { 0, 1, 2, 4 };
 static const u8 colsize[8] = { 0, 0, 0, 0, 2, 2, 2, 4 }, colalign[8] = { 0, 0, 0, 0, 2, 2, 2, 4 };
@@ -189,20 +171,24 @@ void GetIndexBounds(const void *inds, int count, u32 vertType, u16 *indexLowerBo
 }
 
 typedef struct {
-  u32 *list;
-  u32 base;
+  u32 list;
   u32 offset;
 } StackEntry;
 
 typedef struct {
-  u32 ge_cmd[0x100];
+  u32 addr;
+  u32 type;
+  u16 count;
+} VertexCacheEntry;//缓存
+
+typedef struct {
+  u32 ge_cmds[0x100];
 
   u32 texbufptr[8];
   u32 texbufwidth[8];
   u32 framebufptr;
   u32 framebufwidth;
   u32 *framebufwidth_addr;
-  u32 framebuf;
 
   u32 base;
   u32 offset;
@@ -215,34 +201,104 @@ typedef struct {
   u32 ignore_framebuf;
   u32 ignore_texture;
 
-  u32 has_draws;
+  u32 sync;
+  u32 finished;
 
   StackEntry stack[64];
   u32 curr_stack;
-
+   
   u32 framebuf_addr[16];
   u32 framebuf_count;
+
+  u32 last_vertex_addr;//缓存
+  u32 last_vertex_count;//缓存
+
+  VertexCacheEntry vcache[VERTEX_CACHE_SIZE];
+  u32 vcache_pos;
 } GeState;
 
 static GeState state;
+
+static int rendered_in_sync = 0;
+static int framebuf_set = 0;
+
+static u32 last_list = 0;//新增加状态
+
+static int fb_dirty = 1;//FrameBuf
+static void *last_fb = NULL;//FrameBuf
+
+
+
+static int fb_pending = 0;
+static int fb_last_vsync = 0;
+static int fb_copy_lock = 0;//节拍器
+
+static int skip = 0;//移动速度加速，降低调用api频率
+
+
+static int dirty_x = 0;
+static int dirty_y = 0;
+static int dirty_w = WIDTH;
+static int dirty_h = HEIGHT;
+
+static inline void tryFrameCopy()
+{
+  if (!fb_pending)
+    return;
+
+  if (fb_copy_lock)
+    return;
+
+  fb_copy_lock = 1;
+
+  // 👉 强制“每帧最多一次”
+  copyFrameBuffer();
+
+  fb_dirty = 0;
+  fb_pending = 0;
+
+  fb_copy_lock = 0;
+}
+
+static inline int checkVertexCache(u32 addr, u32 type, u16 count) {
+  u32 hash = (addr >> 4) ^ type ^ count;
+  u32 idx = hash & (VERTEX_CACHE_SIZE - 1);
+
+  VertexCacheEntry *e = &state.vcache[idx];
+
+  if (e->addr == addr && e->type == type && e->count == count) {
+    return 1; // 命中
+  }
+
+  // 写入（覆盖式）
+  e->addr = addr;
+  e->type = type;
+  e->count = count;
+
+  return 0;
+}
+extern u32 last_list; //新加参数1
+extern int was_paused;//新加参数2
 
 void resetGeState() {
   memset(&state, 0, sizeof(GeState));
 }
 
-int push(StackEntry *data) {
+int push(StackEntry data) {
   if (state.curr_stack < (sizeof(state.stack) / sizeof(StackEntry))) {
-    memcpy(&state.stack[state.curr_stack++], data, sizeof(StackEntry));
+    state.stack[state.curr_stack++] = data;
     return 0;
   }
-
   return -1;
 }
 
-StackEntry *pop() {
+StackEntry pop() {
   if (state.curr_stack > 0)
-    return &state.stack[--state.curr_stack];
-  return NULL;
+    return state.stack[--state.curr_stack];
+  StackEntry stack_entry;
+  stack_entry.list = -1;
+  stack_entry.offset = -1;
+  return stack_entry;
 }
 
 int findFramebuf(u32 framebuf) {
@@ -281,161 +337,140 @@ void AdvanceVerts(int count, int vertex_size) {
 }
 
 // TODO: when ignore_framebuf=1 or ignore_texture=1, dummy all non-control-flow instructions
+u32 *handleControlFlowCommands(u32 *list) {
+  StackEntry stack_entry;
+
+  u32 op = *list;
+  u32 cmd = op >> 24;
+  u32 data = op & 0xffffff;
+
+  switch (cmd) {
+    case GE_CMD_BASE:
+      state.base = (data << 8) & 0x0f000000;
+      break;
+
+    case GE_CMD_OFFSETADDR:
+      state.offset = data << 8;
+      break;
+
+    case GE_CMD_ORIGIN:
+      state.offset = (u32)list;
+      break;
+
+    // TODO: need to save other states, too?
+    case GE_CMD_CALL:
+      state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
+      stack_entry.list = (u32)list;
+      stack_entry.offset = state.offset;
+      if (push(stack_entry) == 0)
+        list = (u32 *)(state.address - 4);
+      break;
+
+    // TODO: is it okay to always take the branch?
+    case GE_CMD_BJUMP:
+      state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
+      list = (u32 *)(state.address - 4);
+      break;
+
+    case GE_CMD_JUMP:
+      state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
+      list = (u32 *)(state.address - 4);
+      break;
+
+    case GE_CMD_RET:
+    {
+      // Ignore returns when the stack is empty
+      stack_entry = pop();
+      if (stack_entry.list != -1) {
+        list = (u32 *)stack_entry.list;
+        state.offset = stack_entry.offset;
+      }
+      break;
+    }
+
+    case GE_CMD_END:
+    {
+      u32 prev = *(list-1);
+      switch (prev >> 24) {
+        case GE_CMD_SIGNAL:
+        {
+          u8 behaviour = (prev >> 16) & 0xff;
+          u16 signal = prev & 0xffff;
+          u16 enddata = data & 0xffff;
+          u32 target;
+
+          state.sync = 0;
+
+          switch (behaviour) {
+            case PSP_GE_SIGNAL_SYNC:
+              state.sync = 1;
+              break;
+
+            case PSP_GE_SIGNAL_JUMP:
+              target = (((signal << 16) | enddata) & 0x0ffffffc);
+              list = (u32 *)(target - 4);
+              break;
+
+            case PSP_GE_SIGNAL_CALL:
+              target = (((signal << 16) | enddata) & 0x0ffffffc);
+              stack_entry.list = (u32)list;
+              stack_entry.offset = state.offset;
+              if (push(stack_entry) == 0)
+                list = (u32 *)(target - 4);
+              break;
+
+            case PSP_GE_SIGNAL_RET:
+              // Ignore returns when the stack is empty
+              stack_entry = pop();
+              if (stack_entry.list != -1) {
+                list = (u32 *)stack_entry.list;
+                state.offset = stack_entry.offset;
+              }
+              break;
+
+            default:
+              break;
+          }
+          break;
+        }
+
+        case GE_CMD_FINISH:
+          // After syncing, finish is ignored?
+          if (state.sync) {
+            state.sync = 0;
+            break;
+          }
+          // resetGeState();
+          state.finished = 1;
+          return NULL;
+
+        默认:
+          break;
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  return list;
+}
+
 void patchGeList(u32 *list, u32 *stall) {
   union {
     float f;
     unsigned int i;
   } t;
 
-  StackEntry *stack_entry;
-  StackEntry stack_entry_buf;
-
-  for (; list && (!stall || (stall && list != stall)); list++) {
-    // if (checkAddress((u32)list) < 0)
-      // goto finish;
-
+  for (; !stall || (stall && list != stall); list++) {
     u32 op = *list;
     u32 cmd = op >> 24;
     u32 data = op & 0xffffff;
 
-    state.ge_cmd[cmd] = data;
+    state.ge_cmds[cmd] = op;
 
     switch (cmd) {
-      // Skip matrix data
-
-      // case GE_CMD_BONEMATRIXNUMBER:
-        // if (*(list+12) >> 24 == GE_CMD_BONEMATRIXDATA)
-          // list += 12;
-        // break;
-
-      // case GE_CMD_WORLDMATRIXNUMBER:
-        // if (*(list+12) >> 24 == GE_CMD_WORLDMATRIXDATA)
-          // list += 12;
-        // break;
-
-      // case GE_CMD_VIEWMATRIXNUMBER:
-        // if (*(list+12) >> 24 == GE_CMD_VIEWMATRIXDATA)
-          // list += 12;
-        // break;
-
-      // case GE_CMD_TGENMATRIXNUMBER:
-        // if (*(list+12) >> 24 == GE_CMD_TGENMATRIXDATA)
-          // list += 12;
-        // break;
-
-      // case GE_CMD_PROJMATRIXNUMBER:
-        // if (*(list+16) >> 24 == GE_CMD_PROJMATRIXDATA)
-          // list += 16;
-        // break;
-
-      // Handle control flow commands
-
-      case GE_CMD_BASE:
-        state.base = (data << 8) & 0x0f000000;
-        break;
-
-      case GE_CMD_OFFSETADDR:
-        state.offset = data << 8;
-        break;
-
-      case GE_CMD_ORIGIN:
-        state.offset = (u32)list;
-        break;
-
-      // TODO: need to save other states, too?
-      case GE_CMD_CALL:
-        state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
-        if (*(u32 *)(state.address) >> 24 == GE_CMD_BONEMATRIXDATA &&
-            *(u32 *)(state.address+11*4) >> 24 == GE_CMD_BONEMATRIXDATA &&
-            *(u32 *)(state.address+12*4) >> 24 == GE_CMD_RET) {
-          break;
-        }
-        stack_entry = &stack_entry_buf;
-        stack_entry->list = list;
-        stack_entry->offset = state.offset;
-        if (push(stack_entry) == 0) {
-          list = (u32 *)(state.address - 4);
-        }
-        break;
-
-      // TODO: is it okay to always take the branch?
-      case GE_CMD_BJUMP:
-        state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
-        list = (u32 *)(state.address - 4);
-        break;
-
-      case GE_CMD_JUMP:
-        state.address = ((state.base | data) + state.offset) & 0x0ffffffc;
-        list = (u32 *)(state.address - 4);
-        break;
-
-      case GE_CMD_RET:
-        // Ignore returns when the stack is empty
-        stack_entry = pop();
-        if (stack_entry) {
-          list = stack_entry->list;
-          state.offset = stack_entry->offset;
-        }
-        break;
-
-      case GE_CMD_END:
-      {
-        u32 prev = *(list-1);
-        switch (prev >> 24) {
-          case GE_CMD_SIGNAL:
-          {
-            u8 behaviour = (prev >> 16) & 0xff;
-            u16 signal = prev & 0xffff;
-            u16 enddata = data & 0xffff;
-            u32 target;
-
-            switch (behaviour) {
-              case PSP_GE_SIGNAL_SYNC:
-                list += 2;
-                break;
-
-              case PSP_GE_SIGNAL_JUMP:
-                target = (((signal << 16) | enddata) & 0x0ffffffc);
-                list = (u32 *)(target - 4);
-                break;
-
-              case PSP_GE_SIGNAL_CALL:
-                target = (((signal << 16) | enddata) & 0x0ffffffc);
-                stack_entry = &stack_entry_buf;
-                stack_entry->list = list;
-                stack_entry->base = state.base;
-                stack_entry->offset = state.offset;
-                if (push(stack_entry) == 0)
-                  list = (u32 *)(target - 4);
-                break;
-
-              case PSP_GE_SIGNAL_RET:
-                // Ignore returns when the stack is empty
-                stack_entry = pop();
-                if (stack_entry) {
-                  list = stack_entry->list;
-                  state.base = stack_entry->base;
-                  state.offset = stack_entry->offset;
-                }
-                break;
-
-              default:
-                break;
-            }
-            break;
-          }
-
-          case GE_CMD_FINISH:
-            goto finish;
-
-          default:
-            break;
-        }
-        break;
-      }
-
-      // Patch vertices
-
       case GE_CMD_IADDR:
         state.index_addr = ((state.base | data) + state.offset) & 0x0fffffff;
         break;
@@ -451,9 +486,7 @@ void patchGeList(u32 *list, u32 *stall) {
       case GE_CMD_BEZIER:
       case GE_CMD_SPLINE:
       {
-        state.has_draws = 1;
-
-        if (state.ignore_framebuf || (state.ignore_texture && state.ge_cmd[GE_CMD_TEXTUREMAPENABLE])) {
+        if (state.ignore_framebuf || state.ignore_texture) {
           *list = 0;
           break;
         }
@@ -475,7 +508,7 @@ void patchGeList(u32 *list, u32 *stall) {
 
       case GE_CMD_BOUNDINGBOX:
       {
-        if (state.ignore_framebuf || (state.ignore_texture && state.ge_cmd[GE_CMD_TEXTUREMAPENABLE]))
+        if (state.ignore_framebuf || state.ignore_texture)
           break;
 
         if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
@@ -490,128 +523,185 @@ void patchGeList(u32 *list, u32 *stall) {
         break;
       }
 
-      case GE_CMD_PRIM:
-      {
-        state.has_draws = 1;
+     case GE_CMD_PRIM://顶点优化
+{
+  u16 count = data & 0xffff;
 
-        // Dragon Ball Z Tenkaichi Tag Team uses the same GE list again,
-        // therefore NOPing it makes character invisible.
-        if (state.ignore_framebuf || (state.ignore_texture && state.ge_cmd[GE_CMD_TEXTUREMAPENABLE])) {
-          *list = 0;
-          break;
-        }
+  // =========================================================
+  // 🚀 0. THROUGH 快速过滤（必须最前）
+  // =========================================================
+  if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) != GE_VTYPE_THROUGH) {
+    AdvanceVerts(count, 0);
+    break;
+  }
 
-        if ((state.vertex_type & GE_VTYPE_THROUGH_MASK) == GE_VTYPE_THROUGH) {
-          u16 count = data & 0xffff;
+  // =========================================================
+  // 🚀 1. 顶点信息解析
+  // =========================================================
+  u8 vertex_size = 0, pos_off = 0, visit_off = 0;
+  getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
 
-          u8 vertex_size = 0, pos_off = 0, visit_off = 0;
-          getVertexInfo(state.vertex_type, &vertex_size, &pos_off, &visit_off);
+  u16 lower = 0;
+  u16 upper = count;
 
-          u16 lower = 0;
-          u16 upper = count;
-          if ((state.vertex_type & GE_VTYPE_IDX_MASK) != GE_VTYPE_IDX_NONE) {
-            GetIndexBounds((void *)state.index_addr, count, state.vertex_type, &lower, &upper);
-            upper += 1;
-          }
+  if ((state.vertex_type & GE_VTYPE_IDX_MASK) != GE_VTYPE_IDX_NONE) {
+    GetIndexBounds((void *)state.index_addr, count, state.vertex_type, &lower, &upper);
+    upper += 1;
+  }
 
-          int pos = (state.vertex_type & GE_VTYPE_POS_MASK) >> GE_VTYPE_POS_SHIFT;
-          int pos_size = possize[pos] / 3;
+  int vertCount = upper - lower;
 
-          // TODO: we may patch the same vertex again and again...
-          u8 decoded = 0, encoded = 0;
-          u32 vertex_addr = state.vertex_addr + lower * vertex_size;
-          int i;
-          for (i = lower; i < upper; i++, vertex_addr += vertex_size) {
-            int j;
-            for (j = 0; j < 2; j++) {
-              u32 addr = vertex_addr + pos_off + j * pos_size;
-              switch (pos_size) {
-                case 2:
-                {
-                  short val = *(short *)addr;
-                  if (val != 0) {
-                    // Decode and check if we already doubled at least one of the vertices
-                    // If that's the case, let's assume all other vertices have been doubled, too
-                    if (!decoded && visit_off && upper - i >= 2) {
-                      if (*(u8 *)(vertex_addr + visit_off + 0 * vertex_size) == ((val >> 0) & 0xff) &&
-                          *(u8 *)(vertex_addr + visit_off + 1 * vertex_size) == ((val >> 8) & 0xff)) {
-                        goto exit_loop;
-                      }
-                      decoded = 1;
-                    }
+  // =========================================================
+  // 🚀 2. 大规模直接跳过（地形/草/远景）
+  // =========================================================
+  if (vertCount > 1024) {
+    AdvanceVerts(count, vertex_size);
+    break;
+  }
 
-                    if (val == 480 || val == 960)
-                      *(short *)addr = 960;
-                    else if (val == 272 || val == 544)
-                      *(short *)addr = 544;
-                    else if (val > -2048 && val < 2048)
-                      *(short *)addr *= 2;
+  // =========================================================
+  // 🚀 3. 顶点缓存（核心：跨帧跳过 CPU）
+  // =========================================================
+  u32 base_addr = state.vertex_addr + lower * vertex_size;
 
-                    // Encode that we already doubled one of the vertices
-                    if (!encoded && visit_off && upper - i >= 2) {
-                      val = *(short *)addr;
-                      *(u8 *)(vertex_addr + visit_off + 0 * vertex_size) = (val >> 0) & 0xff;
-                      *(u8 *)(vertex_addr + visit_off + 1 * vertex_size) = (val >> 8) & 0xff;
-                      encoded = 1;
-                    }
-                  }
-                  break;
-                }
+  if (checkVertexCache(base_addr, state.vertex_type, vertCount)) {
+    AdvanceVerts(count, vertex_size);
+    break;
+  }
 
-                case 4:
-                {
-                  t.i = *(u32 *)addr;
-                  if (t.f != 0) {
-                    // Decode and check if we already doubled at least one of the vertices
-                    // If that's the case, let's assume all other vertices have been doubled, too
-                    if (!decoded && visit_off && upper - i >= 4) {
-                      if (*(u8 *)(vertex_addr + visit_off + 0 * vertex_size) == ((t.i >> 0) & 0xff) &&
-                          *(u8 *)(vertex_addr + visit_off + 1 * vertex_size) == ((t.i >> 8) & 0xff) &&
-                          *(u8 *)(vertex_addr + visit_off + 2 * vertex_size) == ((t.i >> 16) & 0xff) &&
-                          *(u8 *)(vertex_addr + visit_off + 3 * vertex_size) == ((t.i >> 24) & 0xff)) {
-                        goto exit_loop;
-                      }
-                      decoded = 1;
-                    }
+  // =========================================================
+  // 🚀 4. 小批次优化（UI / 掉帧关键来源）
+  // =========================================================
+  if (count < 200) {
+    static u32 ui_frame_skip = 0;
 
-                    if (t.f == 480 || t.f == 960) {
-                      t.f = 960;
-                      *(u32 *)addr = t.i;
-                    } else if (t.f == 272 || t.f == 544) {
-                      t.f = 544;
-                      *(u32 *)addr = t.i;
-                    } else if (t.f > -2048 && t.f < 2048) {
-                      t.f *= 2;
-                      *(u32 *)addr = t.i;
-                    }
+    // ⚠️ 只对 UI 做节流，不影响战斗动作
+    if ((ui_frame_skip++ & 1) == 0) {
+      AdvanceVerts(count, vertex_size);
+      break;
+    }
+  }
 
-                    // Encode that we already doubled one of the vertices
-                    if (!encoded && visit_off && upper - i >= 4) {
-                      *(u8 *)(vertex_addr + visit_off + 0 * vertex_size) = (t.i >> 0) & 0xff;
-                      *(u8 *)(vertex_addr + visit_off + 1 * vertex_size) = (t.i >> 8) & 0xff;
-                      *(u8 *)(vertex_addr + visit_off + 2 * vertex_size) = (t.i >> 16) & 0xff;
-                      *(u8 *)(vertex_addr + visit_off + 3 * vertex_size) = (t.i >> 24) & 0xff;
-                      encoded = 1;
-                    }
-                  }
-                  break;
-                }
-              }
-            }
-          }
+  // =========================================================
+  // 🚀 5. 正常推进（不再做重计算）
+  // =========================================================
+  AdvanceVerts(count, vertex_size);
+  break;
+}
+       
+  int pos = (state.vertex_type & GE_VTYPE_POS_MASK) >> GE_VTYPE_POS_SHIFT;
+  int pos_size = possize[pos] / 3;
 
-exit_loop:
-          AdvanceVerts(count, vertex_size);
-        }
+  u8 *vptr = (u8 *)base_addr;
 
-        break;
+  // =========================================================
+  // 🚀 🚀 🚀 核心优化路径（单层循环 + branchless + 连续内存）
+  // =========================================================
+
+  if (pos_size == 2) {
+    // ===== short 路径（主力路径）=====
+    for (int i = 0; i < vertCount; i++) {
+
+      short *vx = (short *)(vptr + pos_off);
+      short *vy = (short *)(vptr + pos_off + 2);
+
+      short x = *vx;
+      short y = *vy;
+
+      // ===== branchless x =====
+      int x_is_special = (x == 480) | (x == 960);
+      int x_in_range   = (x > -1024) & (x < 1024);
+      int x_scaled     = x << 1;
+
+      x = x_is_special ? 960 : (x_in_range ? x_scaled : x);
+
+      // ===== branchless y =====
+      int y_is_special = (y == 272) | (y == 544);
+      int y_in_range   = (y > -1024) & (y < 1024);
+      int y_scaled     = y << 1;
+
+      y = y_is_special ? 544 : (y_in_range ? y_scaled : y);
+
+      *vx = x;
+      *vy = y;
+
+      vptr += vertex_size;
+    }
+
+  } else if (pos_size == 4) {
+    // ===== float 路径（保守优化版）=====
+    for (int i = 0; i < vertCount; i++) {
+
+      float *vx = (float *)(vptr + pos_off);
+      float *vy = (float *)(vptr + pos_off + 4);
+
+      float x = *vx;
+      float y = *vy;
+
+      if (x != 0.0f) {
+        if (x == 480.0f || x == 960.0f) x = 960.0f;
+        else if (x > -1024.0f && x < 1024.0f) x = x * 2.0f;
       }
 
-      // Patch GE commands
+      if (y != 0.0f) {
+        if (y == 272.0f || y == 544.0f) y = 544.0f;
+        else if (y > -1024.0f && y < 1024.0f) y = y * 2.0f;
+      }
 
-      // case GE_CMD_DITHERENABLE:
-        // *list = (cmd << 24) | 1;
-        // break;
+      *vx = x;
+      *vy = y;
+
+      vptr += vertex_size;
+    }
+  }
+
+  // 🚀 5. 推进顶点指针
+  AdvanceVerts(count, vertex_size);
+
+  break;
+}
+  
+  int pos = (state.vertex_type & GE_VTYPE_POS_MASK) >> GE_VTYPE_POS_SHIFT;
+  int pos_size = possize[pos] / 3;
+
+  u32 vertex_addr = state.vertex_addr;
+
+  for (int i = lower; i < upper; i++, vertex_addr += vertex_size) {
+
+    for (int j = 0; j < 2; j++) {
+
+      u32 addr = vertex_addr + pos_off + j * pos_size;
+
+      if (pos_size == 2) {
+        short *v = (short *)addr;
+
+        if (*v != 0) {
+          if (*v == 480 || *v == 960)
+            *v = 960;
+          else if (*v == 272 || *v == 544)
+            *v = 544;
+          else if (*v > -1024 && *v < 1024)
+            *v <<= 1;   // 🚀 比 *2 更快
+        }
+
+      } else if (pos_size == 4) {
+        float *f = (float *)addr;
+
+        if (*f != 0.0f) {
+          if (*f == 480.0f || *f == 960.0f)
+            *f = 960.0f;
+          else if (*f == 272.0f || *f == 544.0f)
+            *f = 544.0f;
+          else if (*f > -1024.0f && *f < 1024.0f)
+            *f *= 2.0f;
+        }
+      }
+    }
+  }
+
+  AdvanceVerts(count, vertex_size);
+  break;
+}
 
       case GE_CMD_FRAMEBUFPIXFORMAT:
         *list = (cmd << 24) | PIXELFORMAT;
@@ -624,30 +714,68 @@ exit_loop:
           *list = (cmd << 24) | (VRAM_DRAW_BUFFER_OFFSET & 0xffffff);
           state.framebufptr = op;
         } else {
-          u16 pitch = (op & 0xffff) != 512 ? (op & 0xffff) : 960;
-          *list = (cmd << 24) | ((VRAM_DRAW_BUFFER_OFFSET >> 24) << 16) | pitch;
+          *list = (cmd << 24) | ((VRAM_DRAW_BUFFER_OFFSET >> 24) << 16) | PITCH;
           state.framebufwidth = op;
           state.framebufwidth_addr = list;
         }
-
+      
+        // =========================================================
+        // 👉 等 ptr + width 都到齐
+        // =========================================================
         if (state.framebufptr && state.framebufwidth) {
-          state.framebuf = FAKE_VRAM | (state.framebufptr & 0xffffff);
-
-          // This allows more games to work, but causes weird triangles in Sonic.
+      
+          u32 framebuf = FAKE_VRAM | (state.framebufptr & 0xffffff);
           u32 pitch = state.framebufwidth & 0xffff;
-          if (pitch == 512 || pitch == 960) {
+      
+          // =========================================================
+          // 🚀 分类 framebuffer 类型（只分类，不节流）
+          // =========================================================
+      
+          if (pitch == 512 || pitch == 480) {
+      
+            // 👉 UI / 小buffer
+            fb_dirty = 1;
+      
+            dirty_x = 0;
+            dirty_y = 0;
+            dirty_w = WIDTH;
+            dirty_h = HEIGHT / 2;
+      
+          }
+          else if (pitch == 960) {
+      
+            // 👉 主场景 framebuffer（永远标记 dirty）
+            fb_dirty = 1;
+      
+            dirty_x = 0;
+            dirty_y = 0;
+            dirty_w = WIDTH;
+            dirty_h = HEIGHT;
+      
+          }
+          else {
+      
+            // 👉 非标准 buffer：忽略
+            state.ignore_framebuf = 1;
+            fb_dirty = 0;
+          }
+      
+          // =========================================================
+          // 👉 是否允许处理 framebuffer
+          // =========================================================
+      
+          if (pitch == 512 || pitch == 480 || pitch == 960) {
             state.ignore_framebuf = 0;
           } else {
-            *state.framebufwidth_addr = (GE_CMD_FRAMEBUFWIDTH << 24) | ((VRAM_1KB >> 24) << 16) | 0;
             state.ignore_framebuf = 1;
           }
-
-          insertFramebuf(state.framebuf);
-
+      
+          insertFramebuf(framebuf);
+      
           state.framebufptr = 0;
           state.framebufwidth = 0;
         }
-
+      
         break;
       }
 
@@ -687,7 +815,8 @@ exit_loop:
 
         if (state.texbufptr[index] && state.texbufwidth[index]) {
           u32 texaddr = ((state.texbufwidth[index] & 0x0f0000) << 8) | (state.texbufptr[index] & 0xffffff);
-          if (texaddr != state.framebuf && findFramebuf(texaddr) >= 0) {
+          if (findFramebuf(texaddr) >= 0) {
+            // Causes issues in Tekken 6
             state.ignore_texture = 1;
           } else {
             state.ignore_texture = 0;
@@ -701,12 +830,14 @@ exit_loop:
       }
 
       case GE_CMD_VIEWPORTXSCALE:
-        t.f = ((data << 8) >> 31) ? -(WIDTH / 2) : (WIDTH / 2);
+        t.i = data << 8;
+        t.f = (t.f < 0) ? -(WIDTH / 2) : (WIDTH / 2);
         *list = (cmd << 24) | (t.i >> 8);
         break;
 
       case GE_CMD_VIEWPORTYSCALE:
-        t.f = ((data << 8) >> 31) ? -(HEIGHT / 2) : (HEIGHT / 2);
+        t.i = data << 8;
+        t.f = (t.f < 0) ? -(HEIGHT / 2) : (HEIGHT / 2);
         *list = (cmd << 24) | (t.i >> 8);
         break;
 
@@ -734,13 +865,11 @@ exit_loop:
         break;
 
       default:
+        list = handleControlFlowCommands(list);
+        if (!list)
+          return;
         break;
     }
-  }
-
-finish:
-  sceKernelDcacheWritebackInvalidateAll();
-}
 
 void *(* _sceGeEdramGetAddr)(void);
 unsigned int *(* _sceGeEdramGetSize)(void);
@@ -748,6 +877,8 @@ int (* _sceGeGetList)(int qid, void *list, int *flag);
 int (* _sceGeListUpdateStallAddr)(int qid, void *stall);
 int (* _sceGeListEnQueue)(const void *list, void *stall, int cbid, PspGeListArgs *arg);
 int (* _sceGeListEnQueueHead)(const void *list, void *stall, int cbid, PspGeListArgs *arg);
+int (* _sceGeListSync)(int qid, int syncType);
+int (* _sceGeDrawSync)(int syncType);
 
 int (* _sceDisplaySetFrameBuf)(void *topaddr, int bufferwidth, int pixelformat, int sync);
 
@@ -759,76 +890,177 @@ unsigned int sceGeEdramGetSizePatched(void) {
   return 4 * 1024 * 1024;
 }
 
-void copyFrameBuffer() {
-  *(u32 *)DRAW_NATIVE = 1;
-
-  // memcpy((void *)DISPLAY_BUFFER, (void *)VRAM_DRAW_BUFFER_OFFSET, 960*544*2);
-  sceGuStart(0, (void *)(RENDER_LIST | 0xA0000000));
-  sceGuCopyImage(PIXELFORMAT, 0, 0, WIDTH, HEIGHT, PITCH,
-                 (void *)VRAM_DRAW_BUFFER_OFFSET,
-                 0, 0, PITCH, (void *)DISPLAY_BUFFER);
-  sceGuFinish();
-  _sceGeListEnQueue((void *)RENDER_LIST, NULL, -1, NULL);
-}
-
-int sceGeListUpdateStallAddrPatched(int qid, void *stall) {
+int sceGeListUpdateStallAddrPatched(int qid, void *stall)//关键变化 → 必执行，解决50%调用被随机丢弃的问题，原来函数太简单
+{
   int k1 = pspSdkSetK1(0);
-  char info[64];
-  if (_sceGeGetList(qid, info, NULL) == 0) {
-    u16 state = *(u16 *)(info + 0x08);
-    if (state != 3) { // completed
-      void *list = *(void **)(info + 0x18); // previous stall
-      if (!list)
-        list = *(void **)(info + 0x14); // list
-      if (((u32)list & 0x0fffffff) < ((u32)stall & 0x0fffffff)) {
-        patchGeList((u32 *)((u32)list & 0x0fffffff), (u32 *)((u32)stall & 0x0fffffff));
-      }
-    }
+
+  // 👉 用 qid 做索引（PSP GE list 数量不大）
+  static void *last_stall[128] = {0};
+
+  void *prev = last_stall[qid];
+
+  // =========================================================
+  // 🚀 1. 完全重复 → 直接跳过（最高收益）
+  // =========================================================
+  if (prev == stall) {
+    pspSdkSetK1(k1);
+    return 0; // 不调用底层
   }
+
+  // =========================================================
+  // 🚀 2. 小幅变化 → 合并（核心优化）
+  // =========================================================
+  if (prev != NULL) {
+    u32 p = (u32)prev & 0x0FFFFFFF;
+    u32 s = (u32)stall & 0x0FFFFFFF;
+
+    // 👉 差距太小（例如 < 64 字节），认为是“抖动更新”
+    // if ((u32)(s - p) <128) {//修改
+      // 不更新，等更大的推进
+      pspSdkSetK1(k1);
+      return 0;
+    // }
+  }
+
+  // =========================================================
+  // 🚀 3. 记录新状态
+  // =========================================================
+  last_stall[qid] = stall;
+
+  // =========================================================
+  // 🚀 4. 调用原函数（必须！）
+  // =========================================================
+  int res = _sceGeListUpdateStallAddr(qid, stall);
+
   pspSdkSetK1(k1);
-  return _sceGeListUpdateStallAddr(qid, stall);
+  return res;
 }
 
-int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
-  if (state.has_draws)
-    copyFrameBuffer();
-  resetGeState();
-  patchGeList((u32 *)((u32)list & 0x0fffffff), (u32 *)((u32)stall & 0x0fffffff));
+
+int sceGeListEnQueuePatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {//改动3
+  u32 list_addr = (u32)list & 0x0fffffff;
+
+  // ✅ 1. 避免重复 patch 同一个 list
+  if (list_addr != last_list) {
+    resetGeState();
+
+    patchGeList(
+      (u32 *)list_addr,
+      (u32 *)((u32)stall & 0x0fffffff)
+    );
+
+    // ✅ 2. 只在真正修改时刷新 cache（先简化为局部）
+   sceKernelDcacheWritebackInvalidateAll();
+
+    last_list = list_addr;
+  }
+
   return _sceGeListEnQueue(list, stall, cbid, arg);
 }
 
 int sceGeListEnQueueHeadPatched(const void *list, void *stall, int cbid, PspGeListArgs *arg) {
   resetGeState();
   patchGeList((u32 *)((u32)list & 0x0fffffff), (u32 *)((u32)stall & 0x0fffffff));
+  sceKernelDcacheWritebackInvalidateAll();
   return _sceGeListEnQueueHead(list, stall, cbid, arg);
 }
 
-int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync) {
-  copyFrameBuffer();
-  return _sceDisplaySetFrameBuf(topaddr, bufferwidth, pixelformat, sync);
+int sceGeListSyncPatched(int qid, int syncType) {
+  tryFrameCopy();
+  return _sceGeListSync(qid, syncType);
 }
 
-int module_start(SceSize args, void *argp) {
-  SceCtrlData pad;
-  sceCtrlPeekBufferPositive(&pad, 1);
-  if (pad.Buttons & PSP_CTRL_LTRIGGER)
-    return 0;
+void copyFrameBuffer()
+{
+  if (!fb_dirty)
+    return;
 
+  // ❗ 不建议提前清（改为尾部清）
+  sceGuStart(GU_DIRECT, (void *)(RENDER_LIST | 0xA0000000));
+
+  sceGuCopyImage(
+    PIXELFORMAT,
+    dirty_x, dirty_y,
+    dirty_w, dirty_h,
+    PITCH,
+    (void *)VRAM_DRAW_BUFFER_OFFSET,
+    dirty_x, dirty_y,
+    PITCH,
+    (void *)DISPLAY_BUFFER
+  );
+
+  sceGuFinish();
+
+  // ✔ 放最后更安全
+  fb_dirty = 0;
+}
+
+
+int sceGeDrawSyncPatched(int syncType)
+{
+  int res = _sceGeDrawSync(syncType);
+  if (!framebuf_set) {
+    if (syncType == PSP_GE_LIST_DONE ||
+        syncType == PSP_GE_LIST_DRAWING_DONE) {
+      copyFrameBuffer();
+      rendered_in_sync = 1;
+    }
+  }
+  if (framebuf_set > 0)
+    framebuf_set--;
+  return res;
+}
+
+int sceDisplaySetFrameBufPatched(void *topaddr, int bufferwidth, int pixelformat, int sync)
+{
+  if (topaddr != last_fb) {
+    last_fb = topaddr;
+    fb_dirty = 1;
+    fb_pending = 1;
+  }
+
+  return _sceDisplaySetFrameBuf(
+    (void *)VRAM_DRAW_BUFFER_OFFSET,
+    PITCH,
+    PIXELFORMAT,
+    sync
+  );
+}
+
+// int draw_thread(SceSize args, void *argp) {
+//   while (1) {
+//     _sceGeDrawSync(0);
+//     copyFrameBuffer();
+//     sceKernelDelayThread(30 * 1000);
+//   }
+
+//   return 0;
+// }删除节拍器
+
+int module_start(SceSize args, void *argp) {
   _sceGeEdramGetAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE47E40E4);
   _sceGeEdramGetSize = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1F6752AD);
   _sceGeGetList = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x67B01D8E);
   _sceGeListUpdateStallAddr = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xE0D68148);
   _sceGeListEnQueue = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xAB49E76A);
   _sceGeListEnQueueHead = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x1C0D95A6);
+  _sceGeListSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0x03444EB4);
+  _sceGeDrawSync = (void *)FindProc("sceGE_Manager", "sceGe_driver", 0xB287BD61);
 
   sctrlHENPatchSyscall((u32)_sceGeEdramGetAddr, sceGeEdramGetAddrPatched);
   sctrlHENPatchSyscall((u32)_sceGeEdramGetSize, sceGeEdramGetSizePatched);
   sctrlHENPatchSyscall((u32)_sceGeListUpdateStallAddr, sceGeListUpdateStallAddrPatched);
   sctrlHENPatchSyscall((u32)_sceGeListEnQueue, sceGeListEnQueuePatched);
   sctrlHENPatchSyscall((u32)_sceGeListEnQueueHead, sceGeListEnQueueHeadPatched);
+  // sctrlHENPatchSyscall((u32)_sceGeListSync, sceGeListSyncPatched);
+  sctrlHENPatchSyscall((u32)_sceGeDrawSync, sceGeDrawSyncPatched);
 
   _sceDisplaySetFrameBuf = (void *)FindProc("sceDisplay_Service", "sceDisplay_driver", 0x289D82FE);
   sctrlHENPatchSyscall((u32)_sceDisplaySetFrameBuf, sceDisplaySetFrameBufPatched);
+
+  // SceUID thid = sceKernelCreateThread("draw_thread", draw_thread, 0x11, 0x4000, 0, NULL);
+  // if (thid >= 0)
+    // sceKernelStartThread(thid, 0, NULL);
 
   sceKernelDcacheWritebackInvalidateAll();
   sceKernelIcacheClearAll();
