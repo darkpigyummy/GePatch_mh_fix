@@ -107,6 +107,7 @@ please refer to the [NOTICE](./NOTICE) file.
 This project is licensed under the GPL-2.0 License, with additional notices from PSPSDK.
 
 See the [LICENSE](./LICENSE) file for full details.
+
 ---
 
 # 中文说明
