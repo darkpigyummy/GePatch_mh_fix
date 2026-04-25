@@ -368,3 +368,40 @@ proprietary programs.  If your program is a subroutine library, you may
 consider it more useful to permit linking proprietary applications with the
 library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.
+
+----------------------------------------------------------------
+Additional Notices
+----------------------------------------------------------------
+
+This project is a modified version of the original work and includes components from multiple sources.
+
+1. Original Project
+
+This project is based on an original work licensed under the GNU General Public License v2 (GPLv2).
+In accordance with the GPL, this modified version is also distributed under GPLv2.
+
+2. PSPSDK Components
+
+This project includes code from PSPSDK (such as defines, constants, and headers),
+which is distributed under a BSD-style license.
+
+Copyright (c) 2005
+adresd, Marcus R. Brown, James Forshaw, John Kelley, Jesper Svennevid
+
+Redistribution and use in source and binary forms are permitted,
+provided that the original copyright notice and disclaimer are retained.
+
+3. Modifications
+
+Modifications and additions in this project:
+
+Copyright (c) 2026 Xu Pingfan
+
+These modifications are also distributed under the terms of the GNU General Public License v2.
+
+----------------------------------------------------------------
+Disclaimer
+----------------------------------------------------------------
+
+This software is provided "as is", without any warranty of any kind,
+to the extent permitted by applicable law.
