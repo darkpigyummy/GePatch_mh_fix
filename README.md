@@ -1,110 +1,215 @@
-# GE Patch Plugin
+# Ge MH Patch (PSP/PSVita)
 
-This is an experimental plugin for [Adrenaline](https://github.com/TheOfficialFloW/Adrenaline) that allows you to play a few games in native resolution.
+A lightweight GE patch plugin optimized for **Monster Hunter Portable 3rd**.
+Focuses on improving **frame pacing, responsiveness, and combat stability**, rather than chasing unstable maximum performance.
 
-## Compatibility List
+---
 
-Please help testing games and filling out the [spreadsheet](https://docs.google.com/spreadsheets/d/1aZlmKwELcdpCb9ezI5iRfgcX9hoGxgL4tNC-673aKqk/edit#gid=0).
+## ✨ Features
 
-## Changelog v0.2
+* Improved **frame stability** in gameplay and boss fights
+* Better **input responsiveness** (reduced roll / attack delay)
+* Optimized **GE command handling** to reduce unnecessary workload
+* Smarter **framebuffer update strategy**
+* Reduced micro-stutter caused by frequent state switching
+* Balanced performance (avoids aggressive optimizations that break gameplay timing)
 
-- Added ability to skip GE patches by holding L while starting a game.
-- Changed framebuffer copy algorithm.
-- Changed behavior of sync opcode.
-- Disabled forced dithering again.
+---
 
-## Changelog v0.19.1
+## 🎯 Design Philosophy
 
-- Removed optimization introduced earlier since it's not working.
-- Forced dithering on.
+This patch does **not aim for maximum FPS at all costs**.
 
-## Changelog v0.19
+Instead, it prioritizes:
 
-- Fixed a small bug that was introduced earlier.
-- Fixed a few bugs that caused certain games to crash.
+* Stable frame pacing
+* Consistent input response
+* Playable combat experience
 
-## Changelog v0.18.1
+In fast-paced games like Monster Hunter, **consistency > raw speed**.
 
-**This must be used with Adrenaline-7, not Adrenaline-6.9!**
+---
 
-- Fixed bug that enables more games to render without smear.
+## 📦 Installation
 
-## Changelog v0.18
+### PSVita (Adrenaline 7, 6.61)
 
-**This must be used with Adrenaline-7, not Adrenaline-6.9!**
+Add the following line to:
 
-- Changed fake vram address to allow more games to work.
-- Added patch to allow games to use more memory of fake vram to store textures.
-- Added optimization to prevent double patching of vertices. May increase performance in some games and prevent overzoomed textures.
+`ux0:pspemu/seplugins/game.txt`
 
-## Changelog v0.17.1
+```
+ms0:/seplugins/ge_mh_patch.prx 1
+```
 
-- Fixed indexed draws which caused some games to render at 480x272 only.
+---
 
-## Changelog v0.17
+### PSVita (Adrenaline 8 + ARK-5)
 
-- Fixed artifacts, flickering and black screens in some games.
-- Fixed some regressions introduced in earlier versions.
+Add the following line to:
 
-## Changelog v0.16
+`ux0:pspemu/seplugins/PLUGINS.TXT`
 
-- Added behavior of signal commands.
-- Optimized draws to ignored framebuffers.
+```
+game, ms0:/seplugins/ge_mh_patch.prx, on
+```
 
-## Changelog v0.15
+---
 
-- Switched to using dfs algorithm to traverse the display list.
-- Fixed a few commands and changed their stopping criteras.
-- Added indexed draws support.
+### PSVita (Adrenaline 8 + EPI)
 
-## Changelog v0.14
+Add the following line to:
 
-- Fixed another issue that causes games to show black screen only.
+`ux0:pspemu/seplugins/EPIplugins.txt`
 
-## Changelog v0.13
+```
+game, ms0:/seplugins/ge_mh_patch.prx, on
+```
 
-- Fixed issue where some games would render a black screen only.
-- Fixed issue where some games would crash because vertices were updated multiple times.
+---
 
-## Changelog v0.12
+## ⚠️ Notes
 
-- Fixed issue where some games would be inverted or upsidedown.
+* Designed primarily for **Monster Hunter Portable 3rd**
+* Behavior may vary in other 3D games
+* If you experience input delay, revert to a more conservative configuration
+* Performance gains may show **diminishing returns** depending on your setup
 
-## Changelog v0.11
+---
 
-- Fixed issue where black rectangles would cover the screen in lots of games.
+## 🧠 Technical Overview (Simplified)
 
-## Installation
+This patch improves performance by:
 
-- Before you start make sure that you have
+* Reducing redundant GE processing
+* Stabilizing framebuffer updates
+* Avoiding excessive cache invalidation
+* Minimizing state fluctuation
 
-  - Adrenaline 7 or higher.
-  - The option `Recovery Menu->Advanced->Advanced configuration->Force high memory layout` **DISABLED**.
-  - All plugins in `ux0:pspemu/seplugins/game.txt` and `ux0:pspemu/seplugins/vsh.txt` disabled (you can gradually enable them if you think they should not interfere with GePatch. Please be aware that plugins that print stuff to the screen may not be visible with GePatch since the framebuffer is redirected.
+The goal is to **keep the engine predictable and responsive**, especially during combat.
 
-- Download [ge_patch.prx](https://github.com/TheOfficialFloW/GePatch/releases) and copy it to `ux0:pspemu/seplugins/`.
+---
 
-- Write this line to `ux0:pspemu/seplugins/game.txt` (`ux0:pspemu` is mounted as `ms0:` in the PSP emu):
+## 📌 Disclaimer
 
-  ```
-  ms0:/seplugins/ge_patch.prx 1
-  ```
+This is an experimental optimization plugin.
+Results may vary depending on device, firmware, and game state.
 
-  You can also do the same change in file `ux0:pspemu/seplugins/vsh.txt` to get a XMB in higher resolution, but be aware that the VSH menu will be invisible.
 
-## Known Issues
+## License
 
-Some games may:
+This project is licensed under the GPL-2.0 License, with additional notices from PSPSDK.
 
-- Not display cutscenes.
-- Have a black screen.
-- Not display all textures.
-- Contain clipping/culling.
+See the [LICENSE](./LICENSE) file for full details.
+---
 
-## Donation
+# 中文说明
 
-If you like my work and want to support future projects, you can make a donation:
+一个针对《怪物猎人P3》的 GE 优化插件，核心目标不是极限帧数，而是：
 
-- via bitcoin `361jRJtjppd2iyaAhBGjf9GUCWnunxtZ49`
-- via [paypal](https://www.paypal.me/flowsupport/20)
-- via [patreon](https://www.patreon.com/TheOfficialFloW)
+👉 **战斗稳定性 + 操作手感**
+
+---
+
+## ✨ 特性
+
+* 提升战斗场景帧稳定性（尤其是 Boss 战）
+* 降低翻滚 / 出刀的输入延迟
+* 优化 GE 指令处理流程
+* 改进 framebuffer 更新策略
+* 减少卡顿与状态抖动
+* 避免“看起来流畅但操作变差”的负优化
+
+---
+
+## 🎯 设计理念
+
+本插件不追求“跑分最高”，而是：
+
+* 帧节奏稳定
+* 操作响应稳定
+* 战斗体验优先
+
+在怪猎这种游戏里：
+
+👉 **稳定性 > 极限性能**
+
+---
+
+## 📦 安装方法
+
+### PSVita (Adrenaline 7, 6.61)
+
+编辑：
+
+`ux0:pspemu/seplugins/game.txt`
+
+加入：
+
+```
+ms0:/seplugins/ge_mh_patch.prx 1
+```
+
+---
+
+### PSVita (Adrenaline 8 + ARK-5)
+
+编辑：
+
+`ux0:pspemu/seplugins/PLUGINS.TXT`
+
+加入：
+
+```
+game, ms0:/seplugins/ge_mh_patch.prx, on
+```
+
+---
+
+### PSVita (Adrenaline 8 + EPI)
+
+编辑：
+
+`ux0:pspemu/seplugins/EPIplugins.txt`
+
+加入：
+
+```
+game, ms0:/seplugins/ge_mh_patch.prx, on
+```
+
+---
+
+## ⚠️ 注意
+
+* 主要针对《怪物猎人P3》优化
+* 其他 3D 游戏可能表现不同
+* 如果出现操作延迟，说明优化过度，需要回退
+* 优化存在边际效应，不会无限提升
+
+---
+
+## 🧠 原理（简化版）
+
+主要思路：
+
+* 减少 GE 冗余计算
+* 控制 framebuffer 更新频率
+* 降低 cache 频繁刷新带来的抖动
+* 避免状态频繁切换
+
+核心目标一句话：
+
+👉 **让游戏“稳”和“跟手”**
+
+---
+
+## 📌 免责声明
+
+本插件属于实验性优化，不同设备和环境效果可能不同。
+
+## 许可证
+
+本项目基于 GPL-2.0 许可证发布，并包含来自 PSPSDK 的附加许可声明。
+
+完整内容请参见 [LICENSE](./LICENSE) 文件。
