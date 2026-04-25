@@ -219,6 +219,7 @@ game, ms0:/seplugins/ge_mh_patch.prx, on
 
 本项目基于原始 GePatch 项目进行修改。
 
+
 有关详细的修改内容、版权信息及致谢，请参阅 [NOTICE](./NOTICE) 文件。
 
 ## 许可证
